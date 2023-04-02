@@ -1,3 +1,4 @@
+
 import pandas as pd , numpy as np 
 from sklearn.preprocessing import MinMaxScaler
 from pyod.models.iforest import IForest
@@ -5,20 +6,18 @@ from sklearn.model_selection import cross_val_score
 
 
 class BestSetUp:
+
     """
       
     This class aims to save time by giving you the best options for a datascience problem,
     in terms of model, scaler / transformer, preprocessing of categorical data, and if managing outliers is useful or not.
     All the results are found using cross validation.
-
     Attributes:
     X : A proper dataframe of explanatory variables (with no missing values , and the unuseful features removed).
     y : The target variable in a dataframe with one column.
     models : A list of models , with every models able to functioning with a sklearn fashion
     scalers : A list of sklearn scalers
     n_cv : Number of cross validation to perform at each step. More cv increase the computing time.
-
-
     Methods:
     chose_model : Chose the best model for the dataset , using MinMaxScaler and One-hot-encoding as preprocessing steps
     chose_best_scaler : Chose the best scaler , using only the numerical columns
@@ -26,13 +25,13 @@ class BestSetUp:
     with_or_without_outliers : Using an IForest algorithm , compare the scores between the dataframe without the 5 per cent most extreme values , and the original
     get_best_setup : Returns a string with the best set up found for your problem
     get_X_and_y : Returns X and y preproccessed with the new set up
-
     
     """
 
     def __init__(self , X : pd.DataFrame , y : pd.DataFrame , models : list , scalers : list , n_cv : int):
         self.X = X 
         self.y = y
+        self.y.columns = ['target']
         self.models = models 
         self.scalers = scalers 
         self.n_cv = n_cv
@@ -44,6 +43,7 @@ class BestSetUp:
 
 
     def chose_model(self):
+        
         # Preprocess categorical data for testing purposes
         cat_cols = self.X.select_dtypes(include=object)    
         X_ = pd.concat([pd.get_dummies(cat_cols) , self.X.select_dtypes(include=np.number)] , axis=1)  
@@ -54,8 +54,8 @@ class BestSetUp:
                 X_[col] = MinMaxScaler().fit_transform(X_[col].values.reshape(-1,1))
 
 
-        best_model = None
-        best_score = -10000 # Because the neg mean squarred error might struggle getting better than 0
+        best_model = self.models[0]
+        best_score = np.mean(cross_val_score(best_model , X_, self.y, cv=self.n_cv, scoring=self.scoring))
         
         
         for model in self.models:
@@ -77,21 +77,25 @@ class BestSetUp:
 
 
     def chose_best_scaler(self):
-        best_scaler = None 
-        best_score = -1000 # Because the neg mean squarred error might struggle getting better than 0
-
+  
         # Work only with the numerical features
         to_drop = []
         for col in self.X.select_dtypes(include=np.number):
-            if self.X[col].nunique() <= 5:
+            if self.X[col].nunique() <= 2: # Not binary
                 to_drop.append(col)
         
         # Drop the ordinal / binary / columns with not enought diversity
         X_num = self.X.drop(to_drop , axis=1)
         X_num = X_num.select_dtypes(include=np.number)
 
+        best_scaler = self.scalers[0] 
+        best_score = np.mean(cross_val_score(estimator=self.best_model , X=X_num , y=self.y , cv=self.n_cv , scoring=self.scoring))
+
+
         for scaler in self.scalers:
-            scores = cross_val_score(estimator=self.best_model , X=X_num , y=self.y , cv=self.n_cv , scoring=self.scoring)
+            X_num_copy = X_num.copy()
+            X_num_copy[X_num_copy.columns] = scaler.fit_transform(X_num_copy[X_num_copy.columns])
+            scores = cross_val_score(estimator=self.best_model , X=X_num_copy , y=self.y , cv=self.n_cv , scoring=self.scoring)
             mean_score = np.mean(scores)
 
             if mean_score > best_score:
@@ -99,7 +103,7 @@ class BestSetUp:
                 best_score = mean_score
 
         self.best_scaler = best_scaler
-
+        self.X[X_num.columns] = best_scaler.fit_transform(self.X[X_num.columns])
     
 
 
