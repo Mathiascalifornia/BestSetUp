@@ -2,7 +2,9 @@
 import pandas as pd , numpy as np 
 from sklearn.preprocessing import MinMaxScaler
 from pyod.models.iforest import IForest
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score , RepeatedStratifiedKFold
+from sklearn.metrics import make_scorer , f1_score
+from tqdm import tqdm
 
 
 class BestSetUp:
@@ -28,18 +30,36 @@ class BestSetUp:
     
     """
 
-    def __init__(self , X : pd.DataFrame , y : pd.DataFrame , models : list , scalers : list , n_cv : int):
+    def __init__(self , X : pd.DataFrame , y : pd.DataFrame , models : list , scalers : list , n_cv : int , multiclass : bool):
         self.X = X 
         self.y = y
-        self.y.columns = ['target']
+
         self.models = models 
         self.scalers = scalers 
         self.n_cv = n_cv
+        self.multiclass = multiclass
+        self.cv_type = None
 
-        if self.y.values.dtype == np.number and float(self.y.nunique()) >= 5: # For regression problems
+
+        if type(self.y) == pd.Series:
+            self.y = pd.DataFrame(self.y)
+
+        self.y.columns = ['target']
+
+        if self.y['target'].nunique() == 2: # Unbalanced binary problem
+            if float(self.y.sum()) / len(self.y) <= 0.30 or len(self.y) / float(self.y.sum()) <= 0.30: # Unbalanced class
+                self.cv_type = RepeatedStratifiedKFold(n_splits=self.n_cv)
+
+
+        if self.multiclass == True: # Multiclassification problem
+            self.cv_type = RepeatedStratifiedKFold(n_splits=self.n_cv)
+        
+            
+
+        if self.y.values.dtype == np.number and float(self.y['target'].nunique()) >= 5: # For regression problems
             self.scoring = 'neg_mean_squared_error'
         else:
-             self.scoring = 'accuracy' # For classification
+            self.scoring = make_scorer(f1_score) # For classification
 
 
     def chose_model(self):
@@ -57,11 +77,17 @@ class BestSetUp:
         best_model = self.models[0]
         best_score = np.mean(cross_val_score(best_model , X_, self.y, cv=self.n_cv, scoring=self.scoring))
         
-        
-        for model in self.models:
+ 
+        for model in tqdm(self.models):
                 
                 # Evaluate models
-                scores = cross_val_score(model, X_, self.y, cv=self.n_cv, scoring=self.scoring)
+                if self.cv_type != None:
+
+                    cv = self.cv_type
+                    scores = cross_val_score(model, X_, self.y, cv=cv, scoring=self.scoring)
+                
+                else:
+                    scores = cross_val_score(model, X_, self.y, cv=self.n_cv, scoring=self.scoring)
                 
                 # Mean score
                 mean_score = np.mean(scores)
@@ -85,17 +111,29 @@ class BestSetUp:
                 to_drop.append(col)
         
         # Drop the ordinal / binary / columns with not enought diversity
-        X_num = self.X.drop(to_drop , axis=1)
-        X_num = X_num.select_dtypes(include=np.number)
+        X_num = self.X.copy()
+        X_num = X_num.select_dtypes(include=np.number).drop(to_drop , axis=1)
+
 
         best_scaler = self.scalers[0] 
         best_score = np.mean(cross_val_score(estimator=self.best_model , X=X_num , y=self.y , cv=self.n_cv , scoring=self.scoring))
 
 
-        for scaler in self.scalers:
+        for scaler in tqdm(self.scalers):
             X_num_copy = X_num.copy()
             X_num_copy[X_num_copy.columns] = scaler.fit_transform(X_num_copy[X_num_copy.columns])
-            scores = cross_val_score(estimator=self.best_model , X=X_num_copy , y=self.y , cv=self.n_cv , scoring=self.scoring)
+
+            # Evaluate models
+            if self.cv_type != None:
+
+                cv = self.cv_type
+                scores = cross_val_score(self.best_model, X=X_num_copy, y=self.y, cv=cv, scoring=self.scoring)
+                
+            else:
+
+                scores = cross_val_score(self.best_model, X=X_num_copy, y=self.y, cv=self.n_cv, scoring=self.scoring)
+
+
             mean_score = np.mean(scores)
 
             if mean_score > best_score:
@@ -108,6 +146,7 @@ class BestSetUp:
 
 
     def chose_between_target_encoding_and_ohe(self):
+
         # Transform X using the best scaler
         for col in self.X.select_dtypes(include=np.number):
             if self.X[col].nunique() <= 5:
@@ -120,10 +159,11 @@ class BestSetUp:
         X_ohe['target'] = self.y.values
 
 
-        if self.scoring == 'accuracy':
-            self.best_cat_prepro = 'One-Hot-Encoding' # For binary or label encoding it should be done with domain knowledge , before using this clas
+        if self.scoring == make_scorer(f1_score) or self.multiclass == True or self.y['target'].nunique() <= 5:
+            self.best_cat_prepro = 'One-Hot-Encoding' # For binary or label encoding it should be done with domain knowledge , before using this class
             self.X = X_ohe
         
+
         else: # Because target encoding works only for regression problems
 
             X_te = self.X.copy() # The target encoding dataframe
@@ -150,6 +190,7 @@ class BestSetUp:
 
 
     def with_or_without_outliers(self):
+            
             iforest = IForest(contamination=0.05) # Drop the most extreme 5 per cent of the dataframe
             iforest.fit(self.X)
             is_outliers = list(iforest.predict(self.X))
@@ -167,8 +208,14 @@ class BestSetUp:
             self.X = self.X.drop('outlier' , axis=1 , errors='ignore')
             self.y = self.y.drop('outlier' , axis=1 , errors='ignore')
 
-            scores_without_outliers = np.mean(cross_val_score(estimator=self.best_model , X=X_without_outliers , y=y_without_outliers , cv=self.n_cv))
-            scores_with_outliers = np.mean(cross_val_score(estimator=self.best_model , X=self.X , y=self.y.values , cv=self.n_cv))
+            if self.cv_type != None:
+                cv = self.cv_type
+                scores_without_outliers = np.mean(cross_val_score(estimator=self.best_model , X=X_without_outliers , y=y_without_outliers , cv=cv))
+                scores_with_outliers = np.mean(cross_val_score(estimator=self.best_model , X=self.X , y=self.y.values , cv=cv))
+
+            else:
+                scores_without_outliers = np.mean(cross_val_score(estimator=self.best_model , X=X_without_outliers , y=y_without_outliers , cv=self.n_cv))
+                scores_with_outliers = np.mean(cross_val_score(estimator=self.best_model , X=self.X , y=self.y.values , cv=self.n_cv))
 
             if scores_without_outliers > scores_with_outliers:
                 self.outliers = 'Better get rid of the most extreme 5 percent'
@@ -180,9 +227,13 @@ class BestSetUp:
 
 
     def get_best_setup(self):
+        print('Choosing model ...')
         self.chose_model()
+        print('Choosing scaler ...')
         self.chose_best_scaler()
+        print('Choosing categorical preprocessing ...')
         self.chose_between_target_encoding_and_ohe()
+        print('Dealing with outliers ...\n')
         self.with_or_without_outliers()
 
         return f'Best model : {self.best_model}\nBest scaler : {self.best_scaler}\nBest categorical processing : {self.best_cat_prepro}\
@@ -191,3 +242,6 @@ class BestSetUp:
     def get_X_and_y(self):
         self.X.drop('target' ,  axis=1 , inplace=True , errors='ignore')
         return self.X , self.y
+    
+    def get_best_model(self): return self.best_model
+        
